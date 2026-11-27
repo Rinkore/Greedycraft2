@@ -81,9 +81,10 @@ jobs:
           rm -f packwiz-installer-bootstrap.jar packwiz-installer.jar packwiz.json
 
           python3 - << 'PY'
-          import glob, os, tomllib, urllib.parse, urllib.request
+          import concurrent.futures, glob, os, tomllib, urllib.parse, urllib.request
 
-          missing = []
+          os.makedirs("mods", exist_ok=True)
+          tasks = []
           for path in sorted(glob.glob("../minecraft/mods/.index/*.pw.toml")):
               with open(path, "rb") as f:
                   data = tomllib.load(f)
@@ -93,26 +94,33 @@ jobs:
               dest = os.path.join("mods", filename)
               if os.path.exists(dest):
                   continue
-              cf = data.get("update", {}).get("curseforge")
-              if not cf:
-                  missing.append(filename)
-                  continue
-              fid = str(cf["file-id"])
-              p1 = fid[:4]
-              p2 = str(int(fid[4:]))
-              url = f"https://mediafilez.forgecdn.net/files/{p1}/{p2}/{urllib.parse.quote(filename)}"
-              print(f"Fallback downloading {filename} from {url}")
+              url = data.get("download", {}).get("url")
+              if not url:
+                  cf = data.get("update", {}).get("curseforge")
+                  if cf:
+                      fid = str(cf["file-id"])
+                      url = f"https://mediafilez.forgecdn.net/files/{fid[:4]}/{int(fid[4:])}/{urllib.parse.quote(filename)}"
+              tasks.append((filename, dest, url))
+
+          def download_one(item):
+              filename, dest, url = item
+              if not url:
+                  return filename
               try:
                   req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                   with urllib.request.urlopen(req, timeout=60) as resp, open(dest, "wb") as out:
                       out.write(resp.read())
+                  return None
               except Exception as e:
-                  print(f"Failed to download {filename}: {e}")
-                  missing.append(filename)
+                  print(f"Failed to download {filename} ({url}): {e}")
+                  return filename
+
+          with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+              missing = [res for res in pool.map(download_one, tasks) if res]
 
           if missing:
               raise SystemExit(f"Missing server mods: {missing}")
-          print("All server-side index mods verified.")
+          print(f"All server-side index mods verified ({len(tasks)} downloaded via fallback).")
           PY
 
       - name: 6. 合并 submods 并移除纯客户端模组
